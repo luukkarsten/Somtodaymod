@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Somtoday Utility Mod
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.2
 // @match        https://*.somtoday.nl/*
 // @grant        none
 // @description  yeah boiiiii
@@ -9,6 +9,70 @@
 
 (function() {
     'use strict';
+            // --- NEW: Text Extractor Utility ---
+        var extractHeader = document.createElement("div");
+        extractHeader.innerText = "Tekst Extractor";
+        extractHeader.style = "font-size:12px; color:#00ffcc; font-weight:bold; margin-top:4px; border-top:1px solid #333; padding-top:10px;";
+
+        var myPopup = document.getElementById("mod-menu-popup");
+        if (myPopup) myPopup.appendChild(extractHeader);
+
+        var extractBtn = document.createElement("button");
+        extractBtn.innerText = "Scan pagina voor ruwe tekst";
+        extractBtn.style = "background:#00ffcc; color:#111; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px; width:100%;";
+
+        var extractResults = document.createElement("div");
+        extractResults.style = "background:#292929; border:1px solid #444; border-radius:6px; padding:8px; max-height:100px; overflow-y:auto; font-size:11px; font-family:monospace; color:#aaa; margin-top:6px; display:none;";
+
+        extractBtn.onclick = function() {
+            var foundTexts = new Set();
+            var elements = document.querySelectorAll(".vak, [class*='vak'], .subject, td, span, div, h4, p, appointment, sl-afspraak");
+            var values = Array.from(window.subMap.values());
+            var currentPopup = document.getElementById("mod-menu-popup");
+
+            elements.forEach(function(el) {
+                if (currentPopup && currentPopup.contains(el)) return;
+
+                var txt = (el.textContent || el.innerText || "").trim();
+                if (!txt || txt.length === 0 || txt.length > 30) return;
+                if (values.includes(txt) || window.subMap.has(txt) || window.subMap.has("[" + txt + "]")) return;
+
+                foundTexts.add(txt);
+            });
+
+            extractResults.innerHTML = "";
+            if (foundTexts.size === 0) {
+                extractResults.innerText = "Geen nieuwe onbekende tekst gevonden.";
+            } else {
+                foundTexts.forEach(function(item) {
+                    var itemDiv = document.createElement("div");
+                    itemDiv.innerText = item;
+                    itemDiv.style = "padding:2px 0; border-bottom:1px solid #333; cursor:pointer; color:#fff;";
+                    itemDiv.onclick = function() {
+                        // Dynamically find your "Originele naam" input field
+                        var foundOrigInput = document.querySelector('input[placeholder="bijv. Duitse taal"]');
+                        if (foundOrigInput) {
+                            foundOrigInput.value = item;
+
+                            // Try to look for your error/status message div right below it
+                            var messageDiv = foundOrigInput.nextElementSibling ? foundOrigInput.nextElementSibling.nextElementSibling : null;
+                            if (messageDiv && messageDiv.tagName === 'DIV') {
+                                messageDiv.innerText = "Gekopieerd!";
+                                messageDiv.style.color = "#00ffcc";
+                            }
+                        }
+                    };
+                    extractResults.appendChild(itemDiv);
+                });
+            }
+            extractResults.style.display = "block";
+        };
+
+        if (myPopup) {
+            myPopup.appendChild(extractBtn);
+            myPopup.appendChild(extractResults);
+        }
+
 
     // ==========================================================================
     // PART 1: GLOBAL CONFIGURATION, CONFIG STATE DATA & DATA MAPS
@@ -18,14 +82,18 @@
         var saved = localStorage.getItem('customSubjectMap');
         if (saved) {
             try {
-                return new Map(JSON.parse(saved));
-            } catch(e) {
-                var obj = JSON.parse(saved);
+                var parsed = JSON.parse(saved);
+                if (Array.isArray(parsed)) {
+                    return new Map(parsed);
+                }
                 var entries = [];
-                for (var key in obj) {
-                    if (obj.hasOwnProperty(key)) entries.push([key, obj[key]]);
+                for (var key in parsed) {
+                    if (parsed.hasOwnProperty(key)) entries.push([key, parsed[key]]);
                 }
                 return new Map(entries);
+            } catch (e) {
+                // Malformed data in localStorage - fall through to defaults instead of throwing
+                console.warn("SomtodayMod: kon customSubjectMap niet lezen, val terug op standaardwaarden.", e);
             }
         }
         return new Map([
@@ -52,33 +120,73 @@
     window.censorActive = localStorage.getItem('censorActive') !== 'false';
     window.censorLimit = parseFloat(localStorage.getItem('censorLimit')) || 5.5;
 
+    // --- Per-weekday school end times (Mon..Fri), e.g. "15:45,15:45,15:45,15:45,13:15" ---
+    var DEFAULT_END_TIMES = ["15:45", "15:45", "15:45", "15:45", "15:45"];
+    var DAY_NAMES = ["Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag"];
+
+    function isValidTimeString(t) {
+        return /^([01]?\d|2[0-3]):([0-5]\d)$/.test(t.trim());
+    }
+
+    window.parseEndTimesString = function(str) {
+        if (!str) return DEFAULT_END_TIMES.slice();
+        var parts = str.split(",").map(function(p) { return p.trim(); });
+        if (parts.length !== 5 || !parts.every(isValidTimeString)) {
+            return null;
+        }
+        return parts;
+    };
+
+    window.schoolEndTimes = window.parseEndTimesString(localStorage.getItem('schoolEndTimes')) || DEFAULT_END_TIMES.slice();
+
+    function persistSubMap() {
+        localStorage.setItem('customSubjectMap', JSON.stringify(Array.from(window.subMap.entries())));
+    }
+
 
    // ==========================================================================
     // PART 3B: UNIFIED DRAGGABLE CORE, RUNNER ENGINE & INTERACTIVE GUI PANEL
     // ==========================================================================
 
-    window.replaceTextOnPage = function() {
-        if (window.modActive === false) return;
+window.replaceTextOnPage = function() {
+    if (window.modActive === false) return;
 
-        window.subMap.forEach(function(customName, shortCode) {
-            var elements = document.querySelectorAll(".vak, [class*='vak'], .subject, td, span, div, h4, p, appointment, sl-afspraak");
+    var elements = document.querySelectorAll(".vak, [class*='vak'], .subject, td, span, div, h4, p, appointment, sl-afspraak");
 
-            elements.forEach(function(el) {
-                var txt = el.textContent || el.innerText;
-                if (txt && txt.trim().toLowerCase() === shortCode.toLowerCase()) {
+    window.subMap.forEach(function(customName, shortCode) {
+        elements.forEach(function(el) {
+            var txt = el.textContent || el.innerText;
+            if (!txt) return;
+
+            // CHECK: Does your GUI shortcode start with '[' and end with ']'?
+            if (shortCode.startsWith('[') && shortCode.endsWith(']')) {
+                // Strip the brackets to get the actual clean text (e.g., "8:45")
+                var cleanCode = shortCode.slice(1, -1);
+
+                // STOPS CHAIN REACTION: Only replace if the entire span is EXACTLY this text
+                if (txt.trim().toLowerCase() === cleanCode.toLowerCase()) {
                     el.textContent = customName;
                 }
-                else if (txt && txt.includes(shortCode) && !txt.includes(customName)) {
-                    if (el.children.length === 0) {
-                        el.textContent = txt.split(shortCode).join(customName);
-                    }
-                }
-            });
-        });
-    };
+                return; // Stop here for this shortcode
+            }
 
-    // --- Custom Name Dropdown Selection Menu Panel (Absolute Top Layer Force) ---
-    // --- Custom Name Index Reference System ---
+            // DEFAULT BEHAVIOR: For normal words without brackets (allows partial matches like maandag/dinsdag)
+            if (txt.trim().toLowerCase() === shortCode.toLowerCase()) {
+                el.textContent = customName;
+            }
+            else if (txt.includes(shortCode) && !txt.includes(customName)) {
+                if (el.children.length === 0) {
+                    el.textContent = txt.split(shortCode).join(customName);
+                }
+            }
+        });
+    });
+};
+
+
+
+     // --- Custom Name Dropdown Selection Menu Panel (Absolute Top Layer Force) ---
+    // --- Custom Name Index Reference System, now with Add/Remove ---
     window.showPromptMenu = function() {
         var existing = document.getElementById("mod-menu-popup");
         if (existing) existing.remove();
@@ -99,45 +207,81 @@
         popup.style.setProperty("box-shadow", "0 10px 30px rgba(0,0,0,0.8)", "important");
         popup.style.setProperty("font-family", "Segoe UI, sans-serif", "important");
         popup.style.setProperty("color", "#ffffff", "important");
-        popup.style.setProperty("width", "340px", "important");
+        popup.style.setProperty("width", "360px", "important");
+        popup.style.setProperty("max-height", "85vh", "important");
+        popup.style.setProperty("overflow-y", "auto", "important");
         popup.style.setProperty("display", "flex", "important");
         popup.style.setProperty("flex-direction", "column", "important");
         popup.style.setProperty("gap", "12px", "important");
 
         var title = document.createElement("h3");
-        title.innerText = "Bewerk Vaknaam";
+        title.innerText = "Bewerk Vakken";
         title.style = "margin:0; color:#00ffcc; font-size:16px; text-align:center; font-weight:bold;";
         popup.appendChild(title);
 
-        // --- 1. Cross Reference List Box ---
+                // --- 1. Cross Reference List Box ---
         var listContainer = document.createElement("div");
-        listContainer.style = "background:#292929; border:1px solid #444; border-radius:6px; padding:10px; max-height:160px; overflow-y:auto; font-size:12px; font-family:monospace; color:#ccc;";
-
-        // Convert map to array to give each item a clear index number
-        var subjectArray = Array.from(window.subMap.keys());
-        subjectArray.forEach(function(key, index) {
-            var item = document.createElement("div");
-            item.style = "padding:2px 0; border-bottom:1px solid #333;";
-            item.innerText = "[" + (index + 1) + "] " + key;
-            listContainer.appendChild(item);
-        });
+        listContainer.style = "background:#292929; border:1px solid #444; border-radius:6px; padding:10px; min-height:220px; max-height:220px; overflow-y:auto; font-size:12px; font-family:monospace; color:#ccc; display:block; width:100%; box-sizing:border-box;";
         popup.appendChild(listContainer);
 
-        // --- 2. Number Picker Input ---
+        var subjectArray = [];
+
+        function renderList() {
+            subjectArray = Array.from(window.subMap.keys());
+            listContainer.innerHTML = "";
+
+            if (subjectArray.length === 0) {
+                var empty = document.createElement("div");
+                empty.innerText = "(geen vakken)";
+                empty.style = "color:#666; padding:4px 0;";
+                listContainer.appendChild(empty);
+                return;
+            }
+
+            subjectArray.forEach(function(key, index) {
+                var row = document.createElement("div");
+                row.style = "display:flex; align-items:center; justify-content:space-between; gap:6px; padding:2px 0; border-bottom:1px solid #333;";
+
+                var label = document.createElement("span");
+                label.innerText = "[" + (index + 1) + "] " + key + " → " + window.subMap.get(key);
+                label.style = "overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;";
+                row.appendChild(label);
+
+                var delBtn = document.createElement("button");
+                delBtn.innerText = "✕";
+                delBtn.title = "Verwijderen";
+                delBtn.style = "background:#3a1414; color:#ff5c5c; border:1px solid #ff5c5c; border-radius:4px; width:20px; height:20px; line-height:1; font-size:11px; cursor:pointer; flex-shrink:0;";
+                delBtn.onclick = function() {
+                    window.subMap.delete(key);
+                    persistSubMap();
+                    renderList();
+                };
+                row.appendChild(delBtn);
+
+                listContainer.appendChild(row);
+            });
+        }
+
+        renderList();
+
+        // --- 2. Edit existing entry ---
+        var editHeader = document.createElement("div");
+        editHeader.innerText = "Bestaand vak hernoemen";
+        editHeader.style = "font-size:12px; color:#00ffcc; font-weight:bold; margin-top:4px;";
+        popup.appendChild(editHeader);
+
         var numLabel = document.createElement("label");
-        numLabel.innerText = "Voer het nummer in van het vak:";
+        numLabel.innerText = "Nummer van het vak:";
         numLabel.style = "font-size:11px; color:#aaa; margin:0;";
         popup.appendChild(numLabel);
 
         var numInput = document.createElement("input");
         numInput.type = "number";
         numInput.min = "1";
-        numInput.max = subjectArray.length.toString();
         numInput.placeholder = "bijv. 1";
         numInput.style = "background:#2b2b2b; color:#fff; border:1px solid #555; padding:6px; border-radius:6px; outline:none; font-size:13px; width:100%; box-sizing:border-box;";
         popup.appendChild(numInput);
 
-        // --- 3. New Nickname Input ---
         var textLabel = document.createElement("label");
         textLabel.innerText = "Nieuwe weergavenaam:";
         textLabel.style = "font-size:11px; color:#aaa; margin:0;";
@@ -149,7 +293,6 @@
         nameInput.style = "background:#2b2b2b; color:#00ffcc; border:1px solid #00ffcc; padding:6px; border-radius:6px; outline:none; font-size:13px; font-weight:bold; width:100%; box-sizing:border-box;";
         popup.appendChild(nameInput);
 
-        // Automatically pre-fill the name field if they change the selection index number
         numInput.addEventListener("input", function() {
             var idx = parseInt(numInput.value, 10) - 1;
             if (idx >= 0 && idx < subjectArray.length) {
@@ -160,18 +303,9 @@
             }
         });
 
-        // --- 4. Action Buttons ---
-        var btnRow = document.createElement("div");
-        btnRow.style = "display:flex; justify-content:space-between; margin-top:8px; gap:10px;";
-
-        var cancelBtn = document.createElement("button");
-        cancelBtn.innerText = "Annuleren";
-        cancelBtn.style = "background:#444; color:#fff; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer; flex:1; font-size:12px;";
-        cancelBtn.onclick = function() { popup.remove(); };
-
         var saveBtn = document.createElement("button");
-        saveBtn.innerText = "Opslaan";
-        saveBtn.style = "background:#00ffcc; color:#111; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer; flex:1; font-size:12px;";
+        saveBtn.innerText = "Opslaan wijziging";
+        saveBtn.style = "background:#00ffcc; color:#111; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px;";
         saveBtn.onclick = function() {
             var idx = parseInt(numInput.value, 10) - 1;
             var newName = nameInput.value.trim();
@@ -179,19 +313,273 @@
             if (idx >= 0 && idx < subjectArray.length && newName) {
                 var selectedKey = subjectArray[idx];
                 window.subMap.set(selectedKey, newName);
-                localStorage.setItem('customSubjectMap', JSON.stringify(Array.from(window.subMap.entries())));
+                persistSubMap();
                 if (typeof window.replaceTextOnPage === "function") {
                     window.replaceTextOnPage();
                 }
+                renderList();
+                numInput.value = "";
+                nameInput.value = "";
             }
-            popup.remove();
+        };
+        popup.appendChild(saveBtn);
+
+        // --- 3. Add a brand-new mapping ---
+        var addHeader = document.createElement("div");
+        addHeader.innerText = "Nieuw vak toevoegen";
+        addHeader.style = "font-size:12px; color:#00ffcc; font-weight:bold; margin-top:4px; border-top:1px solid #333; padding-top:10px;";
+        popup.appendChild(addHeader);
+
+        var origLabel = document.createElement("label");
+        origLabel.innerText = "Originele naam (zoals op Somtoday):";
+        origLabel.style = "font-size:11px; color:#aaa; margin:0;";
+        popup.appendChild(origLabel);
+
+        var origInput = document.createElement("input");
+        origInput.type = "text";
+        origInput.placeholder = "bijv. Duitse taal";
+        origInput.style = "background:#2b2b2b; color:#fff; border:1px solid #555; padding:6px; border-radius:6px; outline:none; font-size:13px; width:100%; box-sizing:border-box;";
+        popup.appendChild(origInput);
+
+        var newLabel = document.createElement("label");
+        newLabel.innerText = "Weergavenaam:";
+        newLabel.style = "font-size:11px; color:#aaa; margin:0;";
+        popup.appendChild(newLabel);
+
+        var newInput = document.createElement("input");
+        newInput.type = "text";
+        newInput.placeholder = "bijv. Duits 🇩🇪";
+        newInput.style = "background:#2b2b2b; color:#00ffcc; border:1px solid #00ffcc; padding:6px; border-radius:6px; outline:none; font-size:13px; font-weight:bold; width:100%; box-sizing:border-box;";
+        popup.appendChild(newInput);
+
+        var addMsg = document.createElement("div");
+        addMsg.style = "font-size:11px; color:#ff5c5c; min-height:14px; margin:0;";
+        popup.appendChild(addMsg);
+
+        var addBtn = document.createElement("button");
+        addBtn.innerText = "Toevoegen";
+        addBtn.style = "background:#00ffcc; color:#111; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px;";
+        addBtn.onclick = function() {
+            var origKey = origInput.value.trim();
+            var newVal = newInput.value.trim();
+            addMsg.innerText = "";
+
+            if (!origKey || !newVal) {
+                addMsg.innerText = "Vul beide velden in.";
+                return;
+            }
+            if (window.subMap.has(origKey)) {
+                addMsg.innerText = "Bestaat al — gebruik hernoemen hierboven.";
+                return;
+            }
+
+            window.subMap.set(origKey, newVal);
+            persistSubMap();
+            if (typeof window.replaceTextOnPage === "function") {
+                window.replaceTextOnPage();
+            }
+            renderList();
+            origInput.value = "";
+            newInput.value = "";
+        };
+        popup.appendChild(addBtn);
+
+
+
+                // --- FIXED: Interactive Element Picker Utility ---
+        var uniqueExtractHeader = document.createElement("div");
+        uniqueExtractHeader.innerText = "Tekst Picker Tool";
+        uniqueExtractHeader.style = "font-size:12px; color:#00ffcc; font-weight:bold; margin-top:4px; border-top:1px solid #333; padding-top:10px;";
+        popup.appendChild(uniqueExtractHeader);
+
+        var pickerBtn = document.createElement("button");
+        pickerBtn.innerText = "Selecteer element op pagina 🎯";
+        pickerBtn.style = "background:#00ffcc; color:#111; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px; width:100%; transition: opacity 0.2s;";
+        popup.appendChild(pickerBtn);
+
+        pickerBtn.onclick = function() {
+            // 1. Hide the menu temporarily so the user can click the page elements cleanly
+            popup.style.display = "none";
+
+            // 2. Track the active element being hovered over
+            var currentHoveredElement = null;
+
+            // 3. Create mouse hover style overlays
+            function mouseOverHandler(e) {
+                e.stopPropagation();
+                // Prevent highlighting our own UI elements if any are left visible
+                if (e.target.id === "somtoday-mod-gui" || e.target.closest("#somtoday-mod-gui")) return;
+
+                // Remove highlight from previous item
+                if (currentHoveredElement) {
+                    currentHoveredElement.style.outline = "";
+                    currentHoveredElement.style.backgroundColor = "";
+                }
+
+                // Highlight the target element under your mouse cursor
+                currentHoveredElement = e.target;
+                currentHoveredElement.style.outline = "2px dashed #00ffcc";
+                currentHoveredElement.style.backgroundColor = "rgba(0, 255, 204, 0.15)";
+            }
+
+            function mouseOutHandler(e) {
+                if (e.target === currentHoveredElement) {
+                    e.target.style.outline = "";
+                    e.target.style.backgroundColor = "";
+                    currentHoveredElement = null;
+                }
+            }
+
+            // 4. Capture click events strictly for text extraction
+            function clickHandler(e) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                // Clean up style changes from hover mode
+                if (currentHoveredElement) {
+                    currentHoveredElement.style.outline = "";
+                    currentHoveredElement.style.backgroundColor = "";
+                }
+
+                // Get the raw inner text cleanly
+                var capturedText = (e.target.textContent || e.target.innerText || "").trim();
+
+                // Clean up and disable all our capture listeners instantly
+                document.removeEventListener("mouseover", mouseOverHandler, true);
+                document.removeEventListener("mouseout", mouseOutHandler, true);
+                document.removeEventListener("click", clickHandler, true);
+
+                // 5. Restore the Editor menu and push the text right into your inputs
+                popup.style.display = "flex";
+
+                if (capturedText) {
+                    origInput.value = capturedText;
+                    addMsg.innerText = "Gekopieerd van pagina!";
+                    addMsg.style.color = "#00ffcc";
+                } else {
+                    addMsg.innerText = "Geen tekst gevonden in dit element.";
+                    addMsg.style.color = "#ff5c5c";
+                }
+            }
+
+            // Bind global structural listeners across the page hierarchy
+            document.addEventListener("mouseover", mouseOverHandler, true);
+            document.addEventListener("mouseout", mouseOutHandler, true);
+            document.addEventListener("click", clickHandler, true);
+
+            addMsg.innerText = "Klik op een vak op de pagina...";
+            addMsg.style.color = "#00ffcc";
         };
 
-        btnRow.appendChild(cancelBtn);
-        btnRow.appendChild(saveBtn);
-        popup.appendChild(btnRow);
+
+        // --- 5. Close button ---
+        var closeBtn = document.createElement("button");
+        closeBtn.innerText = "Sluiten";
+        closeBtn.style = "background:#444; color:#fff; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px; margin-top:10px;";
+        closeBtn.onclick = function() { popup.remove(); };
+        popup.appendChild(closeBtn);
 
         document.body.appendChild(popup);
+    };
+
+    // --- Weekly School End Time Editor (Alt+T) ---
+
+
+
+
+    // --- Weekly School End Time Editor (Alt+T) ---
+    // Syntax: "HH:MM,HH:MM,HH:MM,HH:MM,HH:MM" for Mon,Tue,Wed,Thu,Fri.
+    // The same 5 times repeat every week.
+    window.changeSchoolEndTime = function() {
+        var existing = document.getElementById("mod-endtime-popup");
+        if (existing) existing.remove();
+
+        var popup = document.createElement("div");
+        popup.id = "mod-endtime-popup";
+        popup.style.setProperty("position", "fixed", "important");
+        popup.style.setProperty("top", "50%", "important");
+        popup.style.setProperty("left", "50%", "important");
+        popup.style.setProperty("transform", "translate(-50%, -50%)", "important");
+        popup.style.setProperty("z-index", "2147483647", "important");
+        popup.style.setProperty("background", "#1e1e1e", "important");
+        popup.style.setProperty("border", "2px solid #00ffcc", "important");
+        popup.style.setProperty("border-radius", "12px", "important");
+        popup.style.setProperty("padding", "20px", "important");
+        popup.style.setProperty("box-shadow", "0 10px 30px rgba(0,0,0,0.8)", "important");
+        popup.style.setProperty("font-family", "Segoe UI, sans-serif", "important");
+        popup.style.setProperty("color", "#ffffff", "important");
+        popup.style.setProperty("width", "320px", "important");
+        popup.style.setProperty("display", "flex", "important");
+        popup.style.setProperty("flex-direction", "column", "important");
+        popup.style.setProperty("gap", "10px", "important");
+
+        var title = document.createElement("h3");
+        title.innerText = "Schooltijden instellen";
+        title.style = "margin:0; color:#00ffcc; font-size:15px; text-align:center; font-weight:bold;";
+        popup.appendChild(title);
+
+        var explainer = document.createElement("div");
+        explainer.style = "font-size:11px; color:#aaa; line-height:1.5; background:#292929; border:1px solid #444; border-radius:6px; padding:8px;";
+        explainer.innerHTML =
+            "Syntax: <span style='color:#00ffcc; font-weight:bold;'>15:45,15:45,15:45,15:45,15:45</span><br>" +
+            "15 = uur, 45 = minuut. Een komma scheidt de dagen.<br>" +
+            "Er zijn 5 waarden nodig (ma t/m vr) en elke week is hetzelfde.";
+        popup.appendChild(explainer);
+
+        // Per-day mini labels above the field, for orientation
+        var dayLabelsRow = document.createElement("div");
+        dayLabelsRow.style = "display:flex; justify-content:space-between; font-size:10px; color:#777; padding:0 2px;";
+        DAY_NAMES.forEach(function(d) {
+            var span = document.createElement("span");
+            span.innerText = d.slice(0, 2);
+            dayLabelsRow.appendChild(span);
+        });
+        popup.appendChild(dayLabelsRow);
+
+        var timeInput = document.createElement("input");
+        timeInput.type = "text";
+        timeInput.placeholder = "15:45,15:45,15:45,15:45,15:45";
+        timeInput.value = window.schoolEndTimes.join(",");
+        timeInput.style = "background:#2b2b2b; color:#00ffcc; border:1px solid #00ffcc; padding:8px; border-radius:6px; outline:none; font-size:13px; font-weight:bold; width:100%; box-sizing:border-box; font-family:monospace; letter-spacing:0.5px;";
+        popup.appendChild(timeInput);
+
+        var errorMsg = document.createElement("div");
+        errorMsg.style = "font-size:11px; color:#ff5c5c; min-height:14px; margin:0;";
+        popup.appendChild(errorMsg);
+
+        var saveBtn = document.createElement("button");
+        saveBtn.innerText = "Opslaan";
+        saveBtn.style = "background:#00ffcc; color:#111; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px;";
+        saveBtn.onclick = function() {
+            var parsed = window.parseEndTimesString(timeInput.value);
+            if (!parsed) {
+                errorMsg.innerText = "Ongeldig! Gebruik precies 5 tijden zoals 15:45, gescheiden door komma's.";
+                return;
+            }
+            window.schoolEndTimes = parsed;
+            localStorage.setItem('schoolEndTimes', parsed.join(","));
+            if (typeof window.updateFreedomTimer === "function") window.updateFreedomTimer();
+            popup.remove();
+        };
+        popup.appendChild(saveBtn);
+
+        var closeBtn = document.createElement("button");
+        closeBtn.innerText = "Annuleren";
+        closeBtn.style = "background:#444; color:#fff; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px;";
+        closeBtn.onclick = function() { popup.remove(); };
+        popup.appendChild(closeBtn);
+
+        document.body.appendChild(popup);
+        timeInput.focus();
+        timeInput.select();
+
+        // Allow Enter to submit
+        timeInput.addEventListener("keydown", function(e) {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                saveBtn.click();
+            }
+        });
     };
 
     // --- Drag and Drop State Elements ---
@@ -281,9 +669,18 @@
         }
 
         if (curH !== null) {
-            var dayCols = document.querySelectorAll("sl-rooster-dag") || document.querySelectorAll("[class*='rooster']");
-            if (dayCols && dayCols.length > currentDayIndex) {
-                var appointments = dayCols[currentDayIndex].querySelectorAll("sl-afspraak") || dayCols[currentDayIndex].querySelectorAll("[class*='afspraak']");
+            // FIX: querySelectorAll never returns a falsy value (even an empty NodeList is
+            // truthy), so the old `a || b` fallback pattern could never actually fall back.
+            // Check .length explicitly instead.
+            var dayCols = document.querySelectorAll("sl-rooster-dag");
+            if (dayCols.length === 0) {
+                dayCols = document.querySelectorAll("[class*='rooster']");
+            }
+            if (dayCols.length > currentDayIndex) {
+                var appointments = dayCols[currentDayIndex].querySelectorAll("sl-afspraak");
+                if (appointments.length === 0) {
+                    appointments = dayCols[currentDayIndex].querySelectorAll("[class*='afspraak']");
+                }
                 for (var j = 0; j < appointments.length; j++) {
                     var card = appointments[j], cardText = card.innerText || "";
                     if (new RegExp("\\b" + curH.hour + "(e|u)?\\b", "i").test(cardText) || j === (curH.hour - 1)) {
@@ -298,7 +695,9 @@
             }
         }
 
-        var timeParts = (localStorage.getItem('schoolEndTime') || "15:45").split(":");
+        // Use the end time configured for today's weekday (Mon..Fri => index 0..4)
+        var todaysEndTime = window.schoolEndTimes[currentDayIndex] || DEFAULT_END_TIMES[currentDayIndex];
+        var timeParts = todaysEndTime.split(":");
         var diff = ((parseInt(timeParts[0], 10) * 3600) + (parseInt(timeParts[1], 10) * 60)) - ((now.getHours() * 3600) + (now.getMinutes() * 60) + now.getSeconds());
         if (diff <= 0) {
             timerBox.innerText = "JE BENT VRIJ! 🎉";
@@ -356,8 +755,8 @@
             var val = parseFloat(el.innerText.replace(',', '.'));
             if (!isNaN(val) && val < limit) {
                 el.classList.add("cijfer-shield-covered");
-                el.style.background = "#00ffcc";
-                el.style.color = "#00ffcc";
+                el.style.background = "none";
+                el.style.color = "#3f8541";
                 el.style.borderRadius = "4px";
                 el.style.transition = "background 0.2s, color 0.2s";
             }
@@ -402,7 +801,7 @@
         gui.style = "position:fixed !important;bottom:0 !important;left:0 !important;width:100% !important;height:60px !important;background:#111111 !important;border-top:3px solid #00ffcc !important;display:flex !important;align-items:center !important;justify-content:space-between !important;padding:0 30px !important;box-sizing:border-box !important;z-index:2147483647 !important;color:#ffffff !important;font-family:Segoe UI, sans-serif !important;font-size:14px !important;box-shadow:0 -5px 15px rgba(0,0,0,0.6) !important;";
 
         var htmlContent = '';
-        htmlContent += '<div style="font-weight:bold;color:#00ffcc;font-size:15px;margin:0;">SomtodayMod v3.0</div>';
+        htmlContent += '<div style="font-weight:bold;color:#00ffcc;font-size:15px;margin:0;">SomtodayMod v3.2</div>';
         htmlContent += '<div id="mod-motivation-banner" title="Dubbelklik of druk Alt+B om aan te passen" style="font-style:italic;color:#aaaaaa;font-size:13px;text-align:center;flex-grow:1;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;">' + initialText + '</div>';
 
         htmlContent += '<div style="display:flex;align-items:center;gap:20px;margin:0;">';
